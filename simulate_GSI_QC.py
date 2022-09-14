@@ -204,12 +204,37 @@ def simulate_GSI_QC_satwinds(input_err,adjust_err,ob_typ,ob_qm,ob_p,ob_ps,ob_p_p
     #
     # Outputs:
     #  qc_test: Results of GSI QC test (True==passes, False==fails)
+    #  qc_flag: List of numerical flags based on what criteria tripped QC test (0==never tripped)
+    #
+    # qc_flag table:
+    #   0: GSI QC test passes (qc_test==True)
+    #   1: (ob pressure above model top), ratio_errors set to 0
+    #   2: (ob pressure more than 50 hPa above tropopause), error set to 0
+    #   3: (ob pressure more than 950 hPa), error set to 0
+    #   4: (Type [242,243] ob pressure less than 700 hPa), error set to 0
+    #   5: (Type [245] ob between 399-801 hPa), error set to 0
+    #   6: (Type [252] ob between 499-801 hPa), error set to 0
+    #   7: (Type [253] ob between 401-801 hPa), error set to 0
+    #   8: (Type [257] ob pressure less than 249 hPa), error set to 0
+    #   9: (Type [246,250,254] ob pressure greater than 399 hPa), error set to 0
+    #  10: (Type [258] ob pressure greater than 600 hPa), error set to 0
+    #  11: (Type [259] ob pressure greater than 600 hPa), error set to 0
+    #  12: (Type [259] ob pressure less than 249 hPa), error set to 0
+    #  13: (Type [247] ob fails LNVD check), error set to 0
+    #  14: (Type [247] ob fails wdirdiff check), error set to 0
+    #  15: (Type [257,258,259,260] ob fails LNVD check), error set to 0
+    #  16: (Type [244] ob fails LNVD check), error set to 0
+    #  17: (ob fails qcgross test), ratio_errors set to 0
+    #  18: (ratio_errors*error falls beneath tiny_r_kind), qc_test assigned False
+    #  19: (ob_qm is [9,12,15]), qc_test assigned False
+    #  NOTE: 18 but not 17: Likely error is negative from input
     #
     # Line numbers for read_satwnd.f90 and setupw.f90 provided at end of each operation, some operations are
     # skipped, these are provided in comments only
     #
-    # Initialize output as None
+    # Initialize output test as None, flag as empty
     qc_test = None
+    qc_flag = np.asarray([],dtype=np.int32)
     # Include hard-wired rsigp (number of sigma levels, plus 1)
     rsigp=128. # inferred from gridmod.F90
     rsig=rsigp-1 # inferred from L 397
@@ -232,39 +257,67 @@ def simulate_GSI_QC_satwinds(input_err,adjust_err,ob_typ,ob_qm,ob_p,ob_ps,ob_p_p
     
     error = 1./error # L 913
     
-    if dpres>rsig: ratio_errors=0. # L 915-923
-    if ob_p<ob_tp-5000.: error=0. # L 947-950
-    if ob_p>95000.: error=0. # L 952-959
+    if dpres>rsig:
+        ratio_errors=0. # L 915-923
+        qc_flag=np.append(qc_flag,1)
+    if ob_p<ob_tp-5000.:
+        error=0. # L 947-950
+        qc_flag=np.append(qc_flag,2)
+    if ob_p>95000.:
+        error=0. # L 952-959
+        qc_flag=np.append(qc_flag,3)
     
-    if (np.isin(ob_typ,[242,243]))&(ob_p<70000.): error=0. # L 960-962
-    if (np.isin(ob_typ,[245]))&(ob_p<80100.)&(ob_p>39900.): error=0. # L 963-967
-    if (np.isin(ob_typ,[252]))&(ob_p<80100.)&(ob_p>49900.): error=0. # L 968-970
-    if (np.isin(ob_typ,[253]))&(ob_p<80100.)&(ob_p>40100.): error=0. # L 971-975
-    if (np.isin(ob_typ,[246,250,254]))&(ob_p>39900.): error=0. # L 976-978
-    if (np.isin(ob_typ,[257]))&(ob_p<24900.): error=0. # L 979
-    if (np.isin(ob_typ,[258]))&(ob_p>60000.): error=0. # L 980
-    if (np.isin(ob_typ,[259]))&(ob_p>60000.): error=0. # L 981
-    if (np.isin(ob_typ,[259]))&(ob_p<24900.): error=0. # L 982
+    if (np.isin(ob_typ,[242,243]))&(ob_p<70000.):
+        error=0. # L 960-962
+        qc_flag=np.append(qc_flag,4)
+    if (np.isin(ob_typ,[245]))&(ob_p<80100.)&(ob_p>39900.):
+        error=0. # L 963-967
+        qc_flag=np.append(qc_flag,5)
+    if (np.isin(ob_typ,[252]))&(ob_p<80100.)&(ob_p>49900.):
+        error=0. # L 968-970
+        qc_flag=np.append(qc_flag,6)
+    if (np.isin(ob_typ,[253]))&(ob_p<80100.)&(ob_p>40100.):
+        error=0. # L 971-975
+        qc_flag=np.append(qc_flag,7)
+    if (np.isin(ob_typ,[246,250,254]))&(ob_p>39900.):
+        error=0. # L 976-978
+        qc_flag=np.append(qc_flag,8)
+    if (np.isin(ob_typ,[257]))&(ob_p<24900.):
+        error=0. # L 979
+        qc_flag=np.append(qc_flag,9)
+    if (np.isin(ob_typ,[258]))&(ob_p>60000.):
+        error=0. # L 980
+        qc_flag=np.append(qc_flag,10)
+    if (np.isin(ob_typ,[259]))&(ob_p>60000.):
+        error=0. # L 981
+        qc_flag=np.append(qc_flag,11)
+    if (np.isin(ob_typ,[259]))&(ob_p<24900.):
+        error=0. # L 982
+        qc_flag=np.append(qc_flag,12)
     
     # Type 247 LNVD check, L 993-1002
     if (np.isin(ob_typ,[247])):
         if((np.sqrt(ob_u_omf**2.+ob_v_omf**2.)/np.log(ob_speed) >= 3.) |
            ((ob_p > ob_ps-11000.)&(ob_isli != 0))):
-              error = zero
+            error = 0.
+            qc_flag=np.append(qc_flag,13)
     # Type 247 wind direction check, L 1004-1010
     if (np.isin(ob_typ,[247])):
         if (np.min([np.abs(ob_direc-bk_direc),np.abs(ob_direc-bk_direc+360.),np.abs(ob_direc-bk_direc-360.)])>50.):
-            error = zero
+            error = 0.
+            qc_flag=np.append(qc_flag,14)
     # MODIS LNVD check, L 1022-1030
     if (np.isin(ob_typ,[257,258,259,260])):
         if((np.sqrt(ob_u_omf**2.+ob_v_omf**2.)/np.log(ob_speed) >= 3.) |
            ((ob_p > ob_ps-20000.)&(ob_isli != 0))):
-              error = 0.
+            error = 0.
+            qc_flag=np.append(qc_flag,15)
     # Type 244 LNVD check, L 1039-1048
     if (np.isin(ob_typ,[244])):
         if((np.sqrt(ob_u_omf**2.+ob_v_omf**2.)/np.log(ob_speed) >= 3.) |
            ((ob_p > ob_ps-20000.)&(ob_isli != 0))):
-              error = 0.
+            error = 0.
+            qc_flag=np.append(qc_flag,16)
     
     # Compute components of qcgross test
     obserror = 1./max(ratio_errors*error,1.0e-10) # L 1142
@@ -282,11 +335,13 @@ def simulate_GSI_QC_satwinds(input_err,adjust_err,ob_typ,ob_qm,ob_p,ob_ps,ob_p_p
     # qcgross test, L 1168-1174
     if (ratio>qcgross)|(ratio<1.0e-06):
         ratio_errors = 0.
+        qc_flag=np.append(qc_flag,17)
     # else, ratio_errors is then divided by sqrt(dup)
     
     # muse set to false if ratio_errors*error<=tiny_r_kind, L 1206
     if ratio_errors*error<=1.0e-06:
         qc_test=False
+        qc_flag=np.append(qc_flag,18)  # 18 but not 17: Likely error is negative from input
     else:
         qc_test=True
     
@@ -295,9 +350,14 @@ def simulate_GSI_QC_satwinds(input_err,adjust_err,ob_typ,ob_qm,ob_p,ob_ps,ob_p_p
     # error_final defined by ratio_errors*errors, or zero if ratio_errors*errors<=tiny_r_kind, L 1381-1385
     
     # read_satwnd.f90:
-    if (np.isin(ob_qm,[9,12,15])): qc_test=False
+    if (np.isin(ob_qm,[9,12,15])):
+        qc_test=False
+        qc_flag=np.append(qc_flag,19)
     
-    return qc_test
+    # Set qc_flag to contain 0 if passed
+    if qc_test:
+        qc_flag=np.asarray([0])
+    return qc_test,qc_flag
 
 diag_file='satwind_diag_2021080100_0000.nc4'
 geov_file='satwind_geoval_2021080100.nc4'
@@ -344,11 +404,19 @@ ob_spd,ob_dir=uwdvwd_to_spddir(ob_u,ob_v)
 ufo_dir_omf=wdir_diff(ob_dir,ufo_dir)
 gsi_dir_omf=wdir_diff(ob_dir,gsi_dir)
 
-n=50000
+n=150000
 sim_qc_u=np.nan*np.ones((n,))
-
-for i in range(n):
-    if i%1000==0: print(i)
+sim_qc_flg=[]
+np.random.seed(90210)
+sample=np.random.choice(np.arange(np.size(gsi_qc_u)),n,replace=False)
+np.random.seed(None)
+perc_complete=0.
+print('{:.1f}% complete'.format(perc_complete))
+for j in range(n):
+    if (j%np.floor(0.05*n)==0)&(j>0):
+        perc_complete = perc_complete+5.
+        print('{:.1f}% complete'.format(perc_complete))
+    i=sample[j]
     input_err=gsi_err1[i]
     adjust_err=gsi_err2[i]
     final_err=gsi_err3[i]
@@ -365,15 +433,17 @@ for i in range(n):
     bk_direc=ufo_dir[i]
     ob_u_omf=ob_u[i]-ufo_u[i]
     ob_v_omf=ob_v[i]-ufo_v[i]
-    hilb=1.0
 
-    qc_test=simulate_GSI_QC_satwinds(input_err,adjust_err,ob_typ,ob_qm,ob_p,ob_ps,ob_p_prof,
+    qc_test,qc_flag=simulate_GSI_QC_satwinds(input_err,adjust_err,ob_typ,ob_qm,ob_p,ob_ps,ob_p_prof,
                                      ob_tp,ob_isli,ob_speed,bk_speed,ob_direc,bk_direc,ob_u_omf,ob_v_omf,convinfo)
     if qc_test:
-        sim_qc_u[i]=0.
+        sim_qc_u[j]=0.
     else:
-        sim_qc_u[i]=1.
+        sim_qc_u[j]=1.
+    sim_qc_flg.append(qc_flag)
 
+perc_complete = perc_complete+5.
+print('{:.1f}% complete'.format(perc_complete))
 sim_qc_u=sim_qc_u.astype('int32')
 
 np.corrcoef(gsi_qc_u[0:n],sim_qc_u)
