@@ -2,6 +2,7 @@
 import numpy as np
 from netCDF4 import Dataset
 import matplotlib.pyplot as plt
+import time
 
 # Functions
 # Color-coded text outputs
@@ -104,34 +105,28 @@ def spdb_check(uo,vo,um,vm,e,emin,emax,thresh):
     e[e>emax]=emax
     return np.divide(residual,e)<thresh
 
-def p2lev(po,pl,flg):
-    # Recreates grdcrd1 and isrchf functions to find grid coordinate for pressure po given profile pl of size (nl,)
-    # flg: 1 (inreasing p with index), -1 (decreasing)
-    nl=np.size(pl)
-    pdif=po-pl
-    z = np.nan
-    zdif=9.99e+10
-    if flg == 1:
-        for k in range(nl):
-            if (np.abs(pdif[k])<np.abs(zdif))&(pdif[k]>=0):
-                z=k
-                zdif=pdif[k]
-        if(po<=pl[0]):
-            kp=0
-        else:
-            kp=z
-    elif flg == -1:
-        for k in range(nl):
-            if (np.abs(pdif[k])<np.abs(zdif))&(pdif[k]<=0):
-                z=k
-                zdif=pdif[k]
-        if(po>=pl[0]):
-            kp=0
-        else:
-            kp=z
-    d=float(kp)+(po-pl[kp])/(pl[kp+1]-pl[kp])
-    return d
-
+def search_flags(qc_flag_list,search_list):
+    # Searches sim_qc_flg for any instance of a flag in search_list, returns a vector
+    # identifying indices of obs with any hits
+    #
+    # Inputs:
+    #  qc_flag_list: sim_qc_flg, list of numpy arrays containing flags for each ob
+    #  search_list: list of flag numbers to search for hits
+    #
+    # Outputs:
+    #  hits_index: numpy array of indices for obs with search_list hits
+    #
+    # Initialize output as empty array
+    hits_index = np.asarray([],dtype=np.int32)
+    # Assert qc_flag_list and search_list as lists
+    if type(qc_flag_list) != list: qc_flag_list=[qc_flag_list]
+    if type(search_list) != list: search_list=[search_list]
+    # Iterate through qc_flag_list, pull array of flags, and search for any of search_list
+    for i in range(len(qc_flag_list)):
+        flags=qc_flag_list[i]
+        if np.any(np.isin(flags,search_list)): hits_index = np.append(hits_index,i)
+    #
+    return hits_index
 #          typ    cgross   ermin  ermax
 convinfo={
            240 : [ 2.5,     6.1,   1.4],
@@ -155,30 +150,49 @@ convinfo={
 def p2lev(po,pl,flg):
     # Recreates grdcrd1 and isrchf functions to find grid coordinate for pressure po given profile pl of size (nl,)
     # flg: 1 (inreasing p with index), -1 (decreasing)
-    nl=np.size(pl)
-    pdif=po-pl
-    z = np.nan
-    zdif=9.99e+10
-    if flg == 1:
-        for k in range(nl):
-            if (np.abs(pdif[k])<np.abs(zdif))&(pdif[k]>=0):
-                z=k
-                zdif=pdif[k]
-        if(po<=pl[0]):
-            kp=0
-        else:
-            kp=z
-    elif flg == -1:
-        for k in range(nl):
-            if (np.abs(pdif[k])<np.abs(zdif))&(pdif[k]<=0):
-                z=k
-                zdif=pdif[k]
-        if(po>=pl[0]):
-            kp=0
-        else:
-            kp=z
-    d=float(kp)+(po-pl[kp])/(pl[kp+1]-pl[kp])
+    no,nl=np.shape(pl) # n-obs, n-levs
+    d=np.nan*np.ones((no,))
+    pdif=np.nan*np.ones((no,nl))
+    z=-999*np.ones((no,),dtype='int32')
+    zdif=9.99e+10*np.ones(no,)
+    kp=-999*np.ones((no,),dtype='int32')
+    # Loop over levels
+    for k in range(nl):
+        # Compute pdif on level-k
+        pdif[:,k]=po-pl[:,k]
+        # Find updates to z, zdif based on flg
+        if flg==1:
+            x=np.where((np.abs(pdif[:,k])<np.abs(zdif))&(pdif[:,k]>=0))
+            if (np.size(x)>0):
+                z[x]=k
+                zdif[x]=pdif[x,k]
+            kp=z[:]
+            y=np.where(po<=pl[:,0])
+            if (np.size(y)>0):
+                kp[y]=0
+        if flg==-1:
+            x=np.where((np.abs(pdif[:,k])<np.abs(zdif))&(pdif[:,k]<=0))
+            if (np.size(x)>0):
+                z[x]=k
+                zdif[x]=pdif[x,k]
+            kp=z[:]
+            y=np.where(po>=pl[:,0])
+            if (np.size(y)>0):
+                kp[y]=0
+    # Compute d
+    for (i,j) in enumerate(kp): d[i]=float(j)+(po[i]-pl[i,j])/(pl[i,j+1]-pl[i,j])
+    # Return d
     return d
+
+def get_convlib_data(convlib,ob_typ):
+    n=np.size(ob_typ)
+    cgross=np.nan*np.ones((n,))
+    ermax=np.nan*np.ones((n,))
+    ermin=np.nan*np.ones((n,))
+    for i in range(n):
+        cgross[i],ermax[i],ermin[i]=convlib[ob_typ[i]]
+    return cgross,ermax,ermin
+
 
 def simulate_GSI_QC_satwinds(input_err,adjust_err,ob_typ,ob_qm,ob_p,ob_ps,ob_p_prof,
                              ob_tp,ob_isli,ob_speed,bk_speed,ob_direc,bk_direc,ob_u_omf,ob_v_omf,convlib):
@@ -228,137 +242,222 @@ def simulate_GSI_QC_satwinds(input_err,adjust_err,ob_typ,ob_qm,ob_p,ob_ps,ob_p_p
     #  18: (ratio_errors*error falls beneath tiny_r_kind), qc_test assigned False
     #  19: (ob_qm is [9,12,15]), qc_test assigned False
     #  NOTE: 18 but not 17: Likely error is negative from input
-    #
-    # Line numbers for read_satwnd.f90 and setupw.f90 provided at end of each operation, some operations are
-    # skipped, these are provided in comments only
-    #
-    # Initialize output test as None, flag as empty
-    qc_test = None
-    qc_flag = np.asarray([],dtype=np.int32)
+    print('setup')
+    nobs=np.size(ob_typ)
+    qc_test = np.full((nobs,),None)
+    qc_flag=[np.asarray([],dtype='int32') for i in range(nobs)]
+    qc_flag_0 = np.asarray([],dtype='int32')
+    qc_flag_1 = np.asarray([],dtype='int32')
+    qc_flag_2 = np.asarray([],dtype='int32')
+    qc_flag_3 = np.asarray([],dtype='int32')
+    qc_flag_4 = np.asarray([],dtype='int32')
+    qc_flag_5 = np.asarray([],dtype='int32')
+    qc_flag_6 = np.asarray([],dtype='int32')
+    qc_flag_7 = np.asarray([],dtype='int32')
+    qc_flag_8 = np.asarray([],dtype='int32')
+    qc_flag_9 = np.asarray([],dtype='int32')
+    qc_flag_10 = np.asarray([],dtype='int32')
+    qc_flag_11 = np.asarray([],dtype='int32')
+    qc_flag_12 = np.asarray([],dtype='int32')
+    qc_flag_13 = np.asarray([],dtype='int32')
+    qc_flag_14 = np.asarray([],dtype='int32')
+    qc_flag_15 = np.asarray([],dtype='int32')
+    qc_flag_16 = np.asarray([],dtype='int32')
+    qc_flag_17 = np.asarray([],dtype='int32')
+    qc_flag_18 = np.asarray([],dtype='int32')
+    qc_flag_19 = np.asarray([],dtype='int32')
     # Include hard-wired rsigp (number of sigma levels, plus 1)
     rsigp=128. # inferred from gridmod.F90
     rsig=rsigp-1 # inferred from L 397
+    print('get convlib data')
     # Define cgross, ermin, and ermax from convlib based on ob_typ
-    cgross,ermax,ermin=convlib[ob_typ]
+    cgross,ermax,ermin=get_convlib_data(convlib,ob_typ)
     # setupw.f90:
+    print('initialize ratio_errors')
     error = input_err # L 511
-    obserror=max(ermin,min(ermax,adjust_err)) # L 579
+    obserror=np.maximum(ermin,np.minimum(ermax,adjust_err)) # L 579
     dpres = np.log(0.01*ob_p) # L 795
     dpres = dpres-np.log(0.01*ob_ps) # L 797
     drpx = 0. # L 798
     dpres=np.log(np.exp(dpres)*0.01*ob_ps) # L 805
     dpres=p2lev(dpres,np.log(0.01*ob_p_prof),-1)
     sfcchk=p2lev(np.log(0.01*ob_ps),np.log(0.01*ob_p_prof),-1) # L 868
-    rlow=max(sfcchk-dpres,0.) # L 875
-    rhgh=max(dpres-0.001-rsigp,0.) # L 876
-    ratio_errors=error/(adjust_err+drpx+1.0e6*rhgh+4.*rlow) # L 882
+    rlow=np.maximum(sfcchk-dpres,0.) # L 875
+    rhgh=np.maximum(dpres-0.001-rsigp,0.) # L 876
+    ratio_errors=np.divide(error,(adjust_err+drpx+1.0e6*rhgh+4.*rlow)) # L 882
     
     spdb=ob_speed-bk_speed # L 898
     
-    error = 1./error # L 913
+    error = error**-1. # L 913
+    print('find flags')
+    cond_idx=np.where(dpres>rsig)
+    ratio_errors[cond_idx]=0. # L 915-923
+    qc_flag_1=np.union1d(qc_flag_1,cond_idx)
     
-    if dpres>rsig:
-        ratio_errors=0. # L 915-923
-        qc_flag=np.append(qc_flag,1)
-    if ob_p<ob_tp-5000.:
-        error=0. # L 947-950
-        qc_flag=np.append(qc_flag,2)
-    if ob_p>95000.:
-        error=0. # L 952-959
-        qc_flag=np.append(qc_flag,3)
+    cond_idx=np.where(ob_p<ob_tp-5000.)
+    error[cond_idx]=0. # L 947-950
+    qc_flag_2=np.union1d(qc_flag_2,cond_idx)
     
-    if (np.isin(ob_typ,[242,243]))&(ob_p<70000.):
-        error=0. # L 960-962
-        qc_flag=np.append(qc_flag,4)
-    if (np.isin(ob_typ,[245]))&(ob_p<80100.)&(ob_p>39900.):
-        error=0. # L 963-967
-        qc_flag=np.append(qc_flag,5)
-    if (np.isin(ob_typ,[252]))&(ob_p<80100.)&(ob_p>49900.):
-        error=0. # L 968-970
-        qc_flag=np.append(qc_flag,6)
-    if (np.isin(ob_typ,[253]))&(ob_p<80100.)&(ob_p>40100.):
-        error=0. # L 971-975
-        qc_flag=np.append(qc_flag,7)
-    if (np.isin(ob_typ,[246,250,254]))&(ob_p>39900.):
-        error=0. # L 976-978
-        qc_flag=np.append(qc_flag,8)
-    if (np.isin(ob_typ,[257]))&(ob_p<24900.):
-        error=0. # L 979
-        qc_flag=np.append(qc_flag,9)
-    if (np.isin(ob_typ,[258]))&(ob_p>60000.):
-        error=0. # L 980
-        qc_flag=np.append(qc_flag,10)
-    if (np.isin(ob_typ,[259]))&(ob_p>60000.):
-        error=0. # L 981
-        qc_flag=np.append(qc_flag,11)
-    if (np.isin(ob_typ,[259]))&(ob_p<24900.):
-        error=0. # L 982
-        qc_flag=np.append(qc_flag,12)
+    cond_idx=np.where(ob_p>95000.)
+    error[cond_idx]=0. # L 952-959
+    qc_flag_3=np.union1d(qc_flag_3,cond_idx)
     
+    cond_idx=np.where((np.isin(ob_typ,[242,243]))&(ob_p<70000.))
+    error[cond_idx]=0. # L 960-962
+    qc_flag_4=np.union1d(qc_flag_4,cond_idx)
+    
+    cond_idx=np.where((np.isin(ob_typ,[245]))&(ob_p<80100.)&(ob_p>39900.))
+    error[cond_idx]=0. # L 963-967
+    qc_flag_5=np.union1d(qc_flag_5,cond_idx)
+    
+    cond_idx=np.where((np.isin(ob_typ,[252]))&(ob_p<80100.)&(ob_p>49900.))
+    error[cond_idx]=0. # L 968-970
+    qc_flag_6=np.union1d(qc_flag_6,cond_idx)
+    
+    cond_idx=np.where((np.isin(ob_typ,[253]))&(ob_p<80100.)&(ob_p>40100.))
+    error[cond_idx]=0. # L 971-975
+    qc_flag_7=np.union1d(qc_flag_7,cond_idx)
+    
+    cond_idx=np.where((np.isin(ob_typ,[246,250,254]))&(ob_p>39900.))
+    error[cond_idx]=0. # L 976-978
+    qc_flag_8=np.union1d(qc_flag_8,cond_idx)
+
+    cond_idx=np.where((np.isin(ob_typ,[257]))&(ob_p<24900.))
+    error[cond_idx]=0. # L 979
+    qc_flag_9=np.union1d(qc_flag_9,cond_idx)
+
+    cond_idx=np.where((np.isin(ob_typ,[258]))&(ob_p>60000.))
+    error[cond_idx]=0. # L 980
+    qc_flag_10=np.union1d(qc_flag_10,cond_idx)
+
+    cond_idx=np.where((np.isin(ob_typ,[259]))&(ob_p>60000.))
+    error[cond_idx]=0. # L 981
+    qc_flag_11=np.union1d(qc_flag_11,cond_idx)
+
+    cond_idx=np.where((np.isin(ob_typ,[259]))&(ob_p<24900.))
+    error[cond_idx]=0. # L 982
+    qc_flag_12=np.union1d(qc_flag_12,cond_idx)
+
     # Type 247 LNVD check, L 993-1002
-    if (np.isin(ob_typ,[247])):
-        if((np.sqrt(ob_u_omf**2.+ob_v_omf**2.)/np.log(ob_speed) >= 3.) |
-           ((ob_p > ob_ps-11000.)&(ob_isli != 0))):
-            error = 0.
-            qc_flag=np.append(qc_flag,13)
+    cond_idx=np.where((np.isin(ob_typ,[247]))&
+                      ((np.sqrt(ob_u_omf**2.+ob_v_omf**2.) >= 3.*np.log(ob_speed)) |
+                      ((ob_p > ob_ps-11000.)&(ob_isli != 0))))
+    error[cond_idx] = 0. # L 993-1002
+    qc_flag_13=np.union1d(qc_flag_13,cond_idx)
+
     # Type 247 wind direction check, L 1004-1010
-    if (np.isin(ob_typ,[247])):
-        if (np.min([np.abs(ob_direc-bk_direc),np.abs(ob_direc-bk_direc+360.),np.abs(ob_direc-bk_direc-360.)])>50.):
-            error = 0.
-            qc_flag=np.append(qc_flag,14)
+    wdirdiff=ob_direc-bk_direc
+    wdirdiff=np.minimum(np.abs(wdirdiff),np.abs(wdirdiff+360.))
+    wdirdiff=np.minimum(np.abs(wdirdiff),np.abs(wdirdiff-360.))
+    cond_idx=np.where((np.isin(ob_typ,[247]))&
+                      (wdirdiff>50.))
+    error[cond_idx] = 0. # L 1004-1010
+    qc_flag_14=np.union1d(qc_flag_14,cond_idx)
+
     # MODIS LNVD check, L 1022-1030
-    if (np.isin(ob_typ,[257,258,259,260])):
-        if((np.sqrt(ob_u_omf**2.+ob_v_omf**2.)/np.log(ob_speed) >= 3.) |
-           ((ob_p > ob_ps-20000.)&(ob_isli != 0))):
-            error = 0.
-            qc_flag=np.append(qc_flag,15)
+    cond_idx=np.where((np.isin(ob_typ,[257,258,259,260]))&
+                      ((np.sqrt(ob_u_omf**2.+ob_v_omf**2.) >= 3.*np.log(ob_speed)) |
+                      ((ob_p > ob_ps-20000.)&(ob_isli != 0))))
+    error[cond_idx] = 0. # L 1022-1030
+    qc_flag_15=np.union1d(qc_flag_15,cond_idx)
+
     # Type 244 LNVD check, L 1039-1048
-    if (np.isin(ob_typ,[244])):
-        if((np.sqrt(ob_u_omf**2.+ob_v_omf**2.)/np.log(ob_speed) >= 3.) |
-           ((ob_p > ob_ps-20000.)&(ob_isli != 0))):
-            error = 0.
-            qc_flag=np.append(qc_flag,16)
-    
+    cond_idx=np.where((np.isin(ob_typ,[244]))&
+                      ((np.sqrt(ob_u_omf**2.+ob_v_omf**2.) >= 3.*np.log(ob_speed)) |
+                      ((ob_p > ob_ps-20000.)&(ob_isli != 0))))
+    error[cond_idx] = 0. # L 1039-1048
+    qc_flag_16=np.union1d(qc_flag_16,cond_idx)
+
     # Compute components of qcgross test
-    obserror = 1./max(ratio_errors*error,1.0e-10) # L 1142
-    obserrlm = max(ermin,min(ermax,obserror)) # L 1143
+    obserror = np.maximum(ratio_errors*error,1.0e-10)**-1. # L 1142
+    obserrlm = np.maximum(ermin,np.minimum(ermax,obserror)) # L 1143
     residual = np.sqrt((ob_u_omf)**2+(ob_v_omf)**2) # L 1144
     ratio    = residual/obserrlm # L 1145
     qcgross=cgross # L 1148
+
     # qcgross adjustments
-    if (ob_qm==3.): qcgross=0.7*cgross # L 1149-1151
-    if (spdb<0.)&(np.isin(ob_typ,[244])): qcgross=0.7*cgross # L 1154-1156
-    if (spdb<0.)&(np.isin(ob_typ,[245,246]))&(ob_p<40000.)&(ob_p>30000.): qcgross=0.7*cgross # L 1157-1159
-    if (spdb<0.)&(np.isin(ob_typ,[253,254]))&(ob_p<40000.)&(ob_p>20000.): qcgross=0.7*cgross # L 1160-1162
-    if (spdb<0.)&(np.isin(ob_typ,[257,258,259])): qcgross=0.7*cgross # L 1163-1165
-    
+    cond_idx=np.where(ob_qm==3.)
+    qcgross[cond_idx]=0.7*qcgross[cond_idx] # L 1149-1151
+    cond_idx=np.where((spdb<0.)&(np.isin(ob_typ,[244])))
+    qcgross[cond_idx]=0.7*qcgross[cond_idx] # L 1154-1156
+    cond_idx=np.where((spdb<0.)&(np.isin(ob_typ,[245,246]))&(ob_p<40000.)&(ob_p>30000.))
+    qcgross[cond_idx]=0.7*qcgross[cond_idx] # L 1157-1159
+    cond_idx=np.where((spdb<0.)&(np.isin(ob_typ,[253,254]))&(ob_p<40000.)&(ob_p>20000.))
+    qcgross[cond_idx]=0.7*qcgross[cond_idx] # L 1160-1162
+    cond_idx=np.where((spdb<0.)&(np.isin(ob_typ,[257,258,259])))
+    qcgross[cond_idx]=0.7*qcgross[cond_idx] # L 1163-1165
+
     # qcgross test, L 1168-1174
-    if (ratio>qcgross)|(ratio<1.0e-06):
-        ratio_errors = 0.
-        qc_flag=np.append(qc_flag,17)
+    cond_idx=np.where((ratio>qcgross)|(ratio<1.0e-06))
+    ratio_errors[cond_idx]=0. # L 1168-1174
+    qc_flag_17=np.union1d(qc_flag_17,cond_idx)
+
     # else, ratio_errors is then divided by sqrt(dup)
-    
+
     # muse set to false if ratio_errors*error<=tiny_r_kind, L 1206
-    if ratio_errors*error<=1.0e-06:
-        qc_test=False
-        qc_flag=np.append(qc_flag,18)  # 18 but not 17: Likely error is negative from input
-    else:
-        qc_test=True
-    
+    print('define qc_test')
+    cond_idx=np.where(ratio_errors*error<=1.0e-06)
+    qc_test[cond_idx]=False
+    qc_flag_18=np.union1d(qc_flag_18,cond_idx) # 18 but not 17: Likely error is negative from input
+    other_idx=np.setdiff1d(np.arange(nobs,dtype='int32'),cond_idx)
+    qc_test[other_idx]=True
+
     # ratio_errors is then multiplied by sqrt(hilb), L 1232
-    
+
     # error_final defined by ratio_errors*errors, or zero if ratio_errors*errors<=tiny_r_kind, L 1381-1385
-    
+
     # read_satwnd.f90:
-    if (np.isin(ob_qm,[9,12,15])):
-        qc_test=False
-        qc_flag=np.append(qc_flag,19)
-    
+    cond_idx=np.where(np.isin(ob_qm,[9,12,15]))
+    qc_test[cond_idx]=False
+    qc_flag_19=np.union1d(qc_flag_19,cond_idx)
+
+    print('assemble qc_flag')
+    # Assemble qc_flag list
+    for q in qc_flag_1:
+        qc_flag[q]=np.append(qc_flag[q],1)
+    for q in qc_flag_2:
+        qc_flag[q]=np.append(qc_flag[q],2)
+    for q in qc_flag_3:
+        qc_flag[q]=np.append(qc_flag[q],3)
+    for q in qc_flag_4:
+        qc_flag[q]=np.append(qc_flag[q],4)
+    for q in qc_flag_5:
+        qc_flag[q]=np.append(qc_flag[q],5)
+    for q in qc_flag_6:
+        qc_flag[q]=np.append(qc_flag[q],6)
+    for q in qc_flag_7:
+        qc_flag[q]=np.append(qc_flag[q],7)
+    for q in qc_flag_8:
+        qc_flag[q]=np.append(qc_flag[q],8)
+    for q in qc_flag_9:
+        qc_flag[q]=np.append(qc_flag[q],9)
+    for q in qc_flag_10:
+        qc_flag[q]=np.append(qc_flag[q],10)
+    for q in qc_flag_11:
+        qc_flag[q]=np.append(qc_flag[q],11)
+    for q in qc_flag_12:
+        qc_flag[q]=np.append(qc_flag[q],12)
+    for q in qc_flag_13:
+        qc_flag[q]=np.append(qc_flag[q],13)
+    for q in qc_flag_14:
+        qc_flag[q]=np.append(qc_flag[q],14)
+    for q in qc_flag_15:
+        qc_flag[q]=np.append(qc_flag[q],15)
+    for q in qc_flag_16:
+        qc_flag[q]=np.append(qc_flag[q],16)
+    for q in qc_flag_17:
+        qc_flag[q]=np.append(qc_flag[q],17)
+    for q in qc_flag_18:
+        qc_flag[q]=np.append(qc_flag[q],18)
+    for q in qc_flag_19:
+        qc_flag[q]=np.append(qc_flag[q],19)
     # Set qc_flag to contain 0 if passed
-    if qc_test:
-        qc_flag=np.asarray([0])
+    qc_flag_0=np.union1d(qc_flag_0,np.where(qc_test))
+    for q in qc_flag_0:
+        qc_flag[q]=np.append(qc_flag[q],0)
     return qc_test,qc_flag
 
+# Test
 diag_file='satwind_diag_2021080100_0000.nc4'
 geov_file='satwind_geoval_2021080100.nc4'
 diag_hdl=Dataset(diag_file)
@@ -404,47 +503,14 @@ ob_spd,ob_dir=uwdvwd_to_spddir(ob_u,ob_v)
 ufo_dir_omf=wdir_diff(ob_dir,ufo_dir)
 gsi_dir_omf=wdir_diff(ob_dir,gsi_dir)
 
-n=150000
-sim_qc_u=np.nan*np.ones((n,))
-sim_qc_flg=[]
-np.random.seed(90210)
-sample=np.random.choice(np.arange(np.size(gsi_qc_u)),n,replace=False)
-np.random.seed(None)
-perc_complete=0.
-print('{:.1f}% complete'.format(perc_complete))
-for j in range(n):
-    if (j%np.floor(0.05*n)==0)&(j>0):
-        perc_complete = perc_complete+5.
-        print('{:.1f}% complete'.format(perc_complete))
-    i=sample[j]
-    input_err=gsi_err1[i]
-    adjust_err=gsi_err2[i]
-    final_err=gsi_err3[i]
-    ob_typ=ob_typu[i]
-    ob_qm=gsi_qm_u[i]
-    ob_p=ob_pre[i]
-    ob_ps=geo_ps[i]
-    ob_p_prof=geo_lev[i,:].squeeze()
-    ob_tp=geo_tp[i]
-    ob_isli=geo_isli[i]
-    ob_speed=ob_spd[i]
-    bk_speed=ufo_spd[i]
-    ob_direc=ob_dir[i]
-    bk_direc=ufo_dir[i]
-    ob_u_omf=ob_u[i]-ufo_u[i]
-    ob_v_omf=ob_v[i]-ufo_v[i]
+t0=time.time()
+sim_qc_logic,sim_qc_flag=simulate_GSI_QC_satwinds(gsi_err1,gsi_err2,ob_typu,gsi_qm_u,ob_pre,geo_ps,geo_lev,
+                                     geo_tp,geo_isli,ob_spd,ufo_spd,ob_dir,ufo_dir,ob_u-ufo_u,ob_v-ufo_v,convinfo)
+t1=time.time()
+sim_qc_u=np.ones(np.shape(sim_qc_logic),dtype='int32')
+sim_qc_u[np.where(sim_qc_logic)]=0
+print('completed in {:.2f} seconds'.format(t1-t0))
 
-    qc_test,qc_flag=simulate_GSI_QC_satwinds(input_err,adjust_err,ob_typ,ob_qm,ob_p,ob_ps,ob_p_prof,
-                                     ob_tp,ob_isli,ob_speed,bk_speed,ob_direc,bk_direc,ob_u_omf,ob_v_omf,convinfo)
-    if qc_test:
-        sim_qc_u[j]=0.
-    else:
-        sim_qc_u[j]=1.
-    sim_qc_flg.append(qc_flag)
-
-perc_complete = perc_complete+5.
-print('{:.1f}% complete'.format(perc_complete))
-sim_qc_u=sim_qc_u.astype('int32')
-
-np.corrcoef(gsi_qc_u[0:n],sim_qc_u)
+print(np.corrcoef(gsi_qc_u,sim_qc_u))
+print(np.corrcoef(gsi_qc_v,sim_qc_u))
 
