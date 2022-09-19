@@ -63,6 +63,7 @@ sim_qc_logic,sim_qc_flag=simulate_GSI_QC_satwinds(gsi_err1,gsi_err2,ob_typu,gsi_
 t1=time.time()
 sim_qc_u=np.ones(np.shape(sim_qc_logic),dtype='int32')
 sim_qc_u[np.where(sim_qc_logic)]=0
+sim_qc_flag=np.asarray(sim_qc_flag,dtype='object')
 print('completed in {:.2f} seconds'.format(t1-t0))
 
 # Confirm Test
